@@ -5,27 +5,58 @@ import pandas as pd
 import requests
 
 # ==========================================
-# 1. SHOPIFY CONFIGURATION
+# 1. SHOPIFY OAUTH API CONFIGURATION
 # ==========================================
 SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
-SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
+CLIENT_ID = os.getenv("SHOPIFY_CLIENT_ID")
+CLIENT_SECRET = os.getenv("SHOPIFY_CLIENT_SECRET")
+
+def get_shopify_access_token():
+    """
+    Exchanges Client ID & Client Secret for an Admin API Access Token.
+    """
+    if not SHOPIFY_STORE_URL or not CLIENT_ID or not CLIENT_SECRET:
+        print("Shopify API credentials missing in GitHub Secrets.")
+        return None
+        
+    url = f"https://{SHOPIFY_STORE_URL}/admin/oauth/access_token"
+    payload = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET
+    }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=15)
+        if response.status_code == 200:
+            return response.json().get("access_token")
+        else:
+            print(f"Token exchange failed ({response.status_code}): {response.text}")
+            return None
+    except Exception as e:
+        print(f"Error authenticating with Shopify: {e}")
+        return None
 
 def fetch_recent_shopify_orders():
     """
-    Fetches orders updated in the last 2 hours directly from Shopify REST API.
+    Fetches orders created/updated in the last 2 hours.
     """
-    if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN:
-        print("Shopify API environment variables not set. Skipping API pull.")
+    token = get_shopify_access_token()
+    # If token exchange is not required (e.g. secret is already access token)
+    if not token and CLIENT_SECRET and CLIENT_SECRET.startswith('shpss_'):
+        token = CLIENT_SECRET
+
+    if not token:
+        print("No valid access token. Skipping Shopify pull.")
         return pd.DataFrame()
 
     since_time = (datetime.datetime.utcnow() - datetime.timedelta(hours=2)).isoformat()
     url = f"https://{SHOPIFY_STORE_URL}/admin/api/2026-04/orders.json?status=any&updated_at_min={since_time}"
-    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
+    headers = {"X-Shopify-Access-Token": token}
     
     try:
         res = requests.get(url, headers=headers, timeout=30)
         if res.status_code != 200:
-            print(f"Shopify API Error: {res.status_code} - {res.text}")
+            print(f"Shopify API Error ({res.status_code}): {res.text}")
             return pd.DataFrame()
             
         orders = res.json().get('orders', [])
@@ -57,9 +88,6 @@ def fetch_recent_shopify_orders():
         return pd.DataFrame()
 
 def parse_event_date(text):
-    """
-    Parses dates embedded in line item titles (e.g. 'Wednesday, 1st July 2026').
-    """
     patterns = [
         r'(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4})',
         r'([A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})',
@@ -93,7 +121,7 @@ if not df_new.empty:
 else:
     df_combined = df_existing
 
-# Save updated master log to GitHub CSV
+# Save updated master log
 df_combined.to_csv(master_csv_path, index=False)
 
 # ==========================================
@@ -113,7 +141,6 @@ date_range = pd.date_range(start=min_date, end=max_event_date, freq='D')
 daily_results = []
 
 for single_date in date_range:
-    # Rule: Cash collected on or before single_date AND Event occurs strictly AFTER single_date
     paid_condition = df_combined['Paid at'] <= single_date
     future_condition = df_combined['Order Event Date'] > single_date
     
@@ -125,9 +152,6 @@ for single_date in date_range:
     })
 
 df_daily_summary = pd.DataFrame(daily_results)
+df_daily_summary.to_csv('daily_forward_sales.csv', index=False)
 
-# Save summary result directly to CSV for GitHub / Looker Studio
-summary_csv_path = 'daily_forward_sales.csv'
-df_daily_summary.to_csv(summary_csv_path, index=False)
-
-print(f"[{datetime.datetime.utcnow()}] Successfully updated master_orders.csv and daily_forward_sales.csv")
+print(f"[{datetime.datetime.utcnow()}] Successfully processed forward sales data.")
